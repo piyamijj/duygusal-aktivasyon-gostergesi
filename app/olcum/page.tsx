@@ -22,7 +22,6 @@ import {
 import {
   requestCameraStream,
   tryEnableTorch,
-  tryLockExposure,
   disableTorch,
   stopCameraStream,
   checkTorchSupport,
@@ -202,15 +201,11 @@ function MeasurementPageContent() {
     setFingerDetected(false);
     setFingerStatus("Lütfen parmağınızı arka kameraya yerleştirin.");
 
-    // Try to enable torch
+    // Try to enable torch (this single call also opportunistically tries to
+    // stabilize exposure/white-balance in the SAME applyConstraints() call —
+    // see lib/cameraCapture.ts for why these must not be two separate calls).
     const torchOn = await tryEnableTorch(stream);
     setTorchEnabled(torchOn);
-
-    // Best-effort: try to keep exposure/white-balance stable so the camera's
-    // auto-exposure doesn't fight the bright torch + covered-lens scene and
-    // introduce brightness swings unrelated to the actual pulse signal.
-    // Silently no-ops on devices/browsers that don't support this.
-    tryLockExposure(stream);
 
     // Setup offscreen canvas for pixel sampling
     if (!canvasRef.current) {

@@ -63,8 +63,22 @@ export function checkTorchSupport(stream: MediaStream | null): boolean {
 }
 
 /**
- * Attempts to enable the camera flash/torch.
- * Returns true if successful, false otherwise. Never throws.
+ * Attempts to enable the camera flash/torch, AND in the same single
+ * applyConstraints() call, best-effort tries to stabilize exposure/white
+ * balance so the camera's auto-exposure doesn't keep fighting the bright
+ * torch + covered-lens scene mid-measurement (which would otherwise
+ * introduce brightness swings unrelated to the actual pulse signal).
+ *
+ * IMPORTANT: these are combined into ONE applyConstraints() call on purpose.
+ * Issuing two separate applyConstraints({advanced:[...]}) calls back-to-back
+ * on the same track is NOT guaranteed to merge on many Android camera
+ * drivers — a second call can silently reset/override the first "advanced"
+ * constraint set, which was observed to turn the torch back OFF after an
+ * exposure-lock call ran right after it. Bundling both into a single
+ * advanced-constraint object avoids that class of bug entirely.
+ *
+ * Returns whether torch was successfully enabled. Never throws — exposure
+ * locking is pure best-effort and silently ignored if unsupported/rejected.
  */
 export async function tryEnableTorch(stream: MediaStream | null): Promise<boolean> {
   if (!stream) return false;
@@ -79,59 +93,38 @@ export async function tryEnableTorch(stream: MediaStream | null): Promise<boolea
       return false;
     }
 
-    // Apply constraints to turn torch on
-    await track.applyConstraints({
-      advanced: [{ torch: true } as any]
-    });
+    // Build a single advanced constraint set: torch is mandatory here,
+    // exposure/white-balance stabilization is opportunistic add-ons.
+    const advancedConstraint: any = { torch: true };
+    try {
+      if (typeof track.getCapabilities === 'function') {
+        const capabilities = track.getCapabilities() as any;
+        if (capabilities.exposureMode && capabilities.exposureMode.includes('continuous')) {
+          advancedConstraint.exposureMode = 'continuous';
+        }
+        if (capabilities.whiteBalanceMode && capabilities.whiteBalanceMode.includes('continuous')) {
+          advancedConstraint.whiteBalanceMode = 'continuous';
+        }
+      }
+    } catch {
+      // Capability probing failed — just proceed with torch-only constraint below.
+    }
+
+    await track.applyConstraints({ advanced: [advancedConstraint] });
     return true;
   } catch (e) {
     console.error("Failed to enable torch:", e);
-    return false;
-  }
-}
-
-/**
- * Best-effort attempt to lock auto-exposure/auto-white-balance so the
- * bright torch + finger-covered-lens scene doesn't keep getting
- * re-exposed (darkened/brightened) by the camera pipeline mid-measurement,
- * which would otherwise corrupt the pulsatile red-channel signal with
- * exposure-driven brightness swings unrelated to blood volume changes.
- *
- * Support is inconsistent across devices/browsers (most desktop webcams and
- * iOS Safari do not expose these controls at all) — this NEVER throws, and
- * the app works fine without it; it simply reduces one source of noise on
- * devices that DO support it (many Android Chrome builds do).
- */
-export async function tryLockExposure(stream: MediaStream | null): Promise<boolean> {
-  if (!stream) return false;
-  try {
-    const track = stream.getVideoTracks()[0];
-    if (!track || typeof track.getCapabilities !== 'function') return false;
-
-    const capabilities = track.getCapabilities() as any;
-    const advancedConstraints: any = {};
-
-    if (capabilities.exposureMode && capabilities.exposureMode.includes('manual')) {
-      advancedConstraints.exposureMode = 'manual';
-    } else if (capabilities.exposureMode && capabilities.exposureMode.includes('continuous')) {
-      // If manual isn't available, at least keep it continuous (default) rather
-      // than leaving it unset — some devices default to single-shot 'auto'
-      // which re-locks exposure once and then never adapts, which can also
-      // hurt signal quality in the opposite direction.
-      advancedConstraints.exposureMode = 'continuous';
+    // Retry with a torch-only constraint in case the combined object
+    // (with exposure/whiteBalance fields) was what got rejected.
+    try {
+      const track = stream.getVideoTracks()[0];
+      if (track) {
+        await track.applyConstraints({ advanced: [{ torch: true } as any] });
+        return true;
+      }
+    } catch (e2) {
+      console.error("Torch-only retry also failed:", e2);
     }
-
-    if (capabilities.whiteBalanceMode && capabilities.whiteBalanceMode.includes('manual')) {
-      advancedConstraints.whiteBalanceMode = 'manual';
-    }
-
-    if (Object.keys(advancedConstraints).length === 0) return false;
-
-    await track.applyConstraints({ advanced: [advancedConstraints] });
-    return true;
-  } catch (e) {
-    // Best-effort only — many devices reject this constraint set entirely.
-    console.warn("Exposure lock not applied (device/browser likely unsupported):", e);
     return false;
   }
 }
