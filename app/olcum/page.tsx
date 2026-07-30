@@ -92,8 +92,35 @@ function MeasurementPageContent() {
   const addDebug = (line: string) => {
     const stamped = `${new Date().toLocaleTimeString("tr-TR")} — ${line}`;
     console.log("[DAG_DEBUG]", stamped);
-    setDebugLines((prev) => [...prev.slice(-11), stamped]);
+    setDebugLines((prev) => [...prev.slice(-19), stamped]);
   };
+
+  // Global catch-all: any uncaught synchronous error OR unhandled promise
+  // rejection anywhere on the page gets surfaced into the same debug panel.
+  // Without this, a silent exception (e.g. inside an event listener or a
+  // fire-and-forget async call) can stop a whole flow dead with ZERO trace,
+  // which is exactly the symptom we're chasing (log stops after mic granted,
+  // no error shown anywhere).
+  useEffect(() => {
+    const onError = (event: ErrorEvent) => {
+      addDebug(
+        `GENEL HATA (window.onerror): ${event.message} @ ${event.filename}:${event.lineno}`
+      );
+    };
+    const onRejection = (event: PromiseRejectionEvent) => {
+      const reason = event.reason;
+      addDebug(
+        `YAKALANMAMIŞ PROMISE HATASI: ${reason?.name || ""} ${reason?.message || reason}`
+      );
+    };
+    window.addEventListener("error", onError);
+    window.addEventListener("unhandledrejection", onRejection);
+    return () => {
+      window.removeEventListener("error", onError);
+      window.removeEventListener("unhandledrejection", onRejection);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Duration Constants
   const PULSE_DURATION_MS = 20000; // 20 seconds
@@ -118,6 +145,9 @@ function MeasurementPageContent() {
   const pulseStartRequestedRef = useRef(false);
 
   useEffect(() => {
+    addDebug(
+      `[EFEKT TETİKLENDİ] step=${step}, cameraStream=${cameraStream ? "VAR" : "YOK"}, videoRef=${videoRef.current ? "VAR" : "YOK"}`
+    );
     const video = videoRef.current;
     if (!video || !cameraStream || step !== "kamera_nabiz") return;
 
