@@ -84,6 +84,17 @@ function MeasurementPageContent() {
   const [pulseResult, setPulseResult] = useState<any>(null);
   const [voiceResult, setVoiceResult] = useState<any>(null);
 
+  // --- TEMPORARY ON-SCREEN DEBUG PANEL ---
+  // This surfaces real device/browser state directly in the UI, since mobile
+  // testers usually cannot see the browser devtools console. Remove once the
+  // camera pulse detection issue is confirmed fixed on the target device.
+  const [debugLines, setDebugLines] = useState<string[]>([]);
+  const addDebug = (line: string) => {
+    const stamped = `${new Date().toLocaleTimeString("tr-TR")} — ${line}`;
+    console.log("[DAG_DEBUG]", stamped);
+    setDebugLines((prev) => [...prev.slice(-11), stamped]);
+  };
+
   // Duration Constants
   const PULSE_DURATION_MS = 20000; // 20 seconds
   const VOICE_DURATION_MS = 15000; // 15 seconds
@@ -110,23 +121,40 @@ function MeasurementPageContent() {
     const video = videoRef.current;
     if (!video || !cameraStream || step !== "kamera_nabiz") return;
 
+    const tracks = cameraStream.getVideoTracks();
+    addDebug(
+      `Kamera akışı bağlandı. Track sayısı: ${tracks.length}, track etiketi: ${tracks[0]?.label || "yok"}, track durumu: ${tracks[0]?.readyState || "yok"}`
+    );
+
     video.srcObject = cameraStream;
 
     const beginSamplingOnce = () => {
       if (pulseStartRequestedRef.current) return;
       pulseStartRequestedRef.current = true;
+      addDebug(
+        `Video oynatılıyor. videoWidth=${video.videoWidth}, videoHeight=${video.videoHeight}, readyState=${video.readyState}`
+      );
       startPulseMeasurement(cameraStream);
     };
 
     video.addEventListener("playing", beginSamplingOnce);
     video
       .play()
-      .catch((e) => console.error("Video play error:", e));
+      .then(() => addDebug("video.play() başarılı şekilde çözüldü (resolved)."))
+      .catch((e) => {
+        addDebug(`video.play() HATA VERDİ: ${e?.name || ""} ${e?.message || e}`);
+        console.error("Video play error:", e);
+      });
 
     // Fallback: some Android WebViews never fire 'playing' reliably even
     // though frames are already flowing — if readyState indicates enough
     // data after a short delay, start anyway instead of hanging forever.
     const fallbackTimer = setTimeout(() => {
+      if (!pulseStartRequestedRef.current) {
+        addDebug(
+          `'playing' eventi 800ms içinde ateşlenmedi. readyState=${video.readyState}, paused=${video.paused}. ${video.readyState >= 2 ? "Fallback ile başlatılıyor." : "Henüz veri yok, bekleniyor."}`
+        );
+      }
       if (video.readyState >= 2) {
         beginSamplingOnce();
       }
@@ -158,15 +186,23 @@ function MeasurementPageContent() {
     try {
       if (mode === "camera_audio") {
         // Request camera first
+        addDebug("Kamera izni isteniyor (getUserMedia)...");
         const cam = await requestCameraStream();
+        const camTrack = cam.getVideoTracks()[0];
+        addDebug(
+          `Kamera izni ALINDI. Track etiketi: "${camTrack?.label || "bilinmiyor"}", ayarlar: ${JSON.stringify(camTrack?.getSettings?.() || {})}`
+        );
         setCameraStream(cam);
         
         // Check torch support
         const hasTorch = checkTorchSupport(cam);
+        addDebug(`Torch (flaş) desteği kontrolü: ${hasTorch ? "DESTEKLENİYOR" : "DESTEKLENMİYOR"}`);
         setTorchSupported(hasTorch);
 
         // Request mic
+        addDebug("Mikrofon izni isteniyor...");
         const mic = await requestMicrophoneStream();
+        addDebug("Mikrofon izni ALINDI.");
         setMicStream(mic);
 
         // Advance to camera pulse step. The actual sampling loop starts
@@ -185,6 +221,7 @@ function MeasurementPageContent() {
         startVoiceMeasurement(mic);
       }
     } catch (err: any) {
+      addDebug(`HATA (izin/kurulum aşamasında): ${err?.name || ""} ${err?.message || err}`);
       cleanupHardware();
       setErrorMessage(err.message || "İzinler alınırken bir hata oluştu.");
       setStep("hata");
@@ -204,7 +241,9 @@ function MeasurementPageContent() {
     // Try to enable torch (this single call also opportunistically tries to
     // stabilize exposure/white-balance in the SAME applyConstraints() call —
     // see lib/cameraCapture.ts for why these must not be two separate calls).
+    addDebug("Flaş (torch) açma denemesi başlıyor...");
     const torchOn = await tryEnableTorch(stream);
+    addDebug(`Flaş açma sonucu: ${torchOn ? "BAŞARILI ✓" : "BAŞARISIZ ✗"}`);
     setTorchEnabled(torchOn);
 
     // Setup offscreen canvas for pixel sampling
@@ -215,12 +254,23 @@ function MeasurementPageContent() {
 
     let startTime = performance.now();
     let lastBpmEstimateTime = startTime;
+    let lastDebugLogTime = startTime;
+    let frameCallCount = 0;
+    let nullSampleCount = 0;
 
     const sampleFrame = () => {
+      frameCallCount++;
       const video = videoRef.current;
       if (!video || video.readyState < 2) {
         // Video not yet mounted or not enough data buffered to read frames —
         // keep polling via RAF instead of sampling garbage/black pixels.
+        const now0 = performance.now();
+        if (now0 - lastDebugLogTime > 2000) {
+          lastDebugLogTime = now0;
+          addDebug(
+            `Örnekleme bekliyor: video=${video ? "var" : "YOK"}, readyState=${video?.readyState ?? "-"} (2+ gerekli)`
+          );
+        }
         pulseRafRef.current = requestAnimationFrame(sampleFrame);
         return;
       }
@@ -234,6 +284,17 @@ function MeasurementPageContent() {
         const check = checkFingerDetection(samples);
         setFingerDetected(check.detected);
         setFingerStatus(check.reason);
+
+        // Throttled debug: show actual sampled RGB values every ~1.5s so we
+        // can see whether the camera is reading real (bright/dark red)
+        // pixels or something unexpected (all-black, all-white, etc.)
+        const nowDbg = performance.now();
+        if (nowDbg - lastDebugLogTime > 1500) {
+          lastDebugLogTime = nowDbg;
+          addDebug(
+            `Örnek RGB: R=${sample.r.toFixed(0)} G=${sample.g.toFixed(0)} B=${sample.b.toFixed(0)} | ${check.reason}`
+          );
+        }
 
         const elapsed = performance.now() - startTime;
         const progress = Math.min(100, (elapsed / PULSE_DURATION_MS) * 100);
@@ -261,6 +322,15 @@ function MeasurementPageContent() {
           // Finished pulse capture
           finishPulseMeasurement();
           return;
+        }
+      } else {
+        nullSampleCount++;
+        const nowNull = performance.now();
+        if (nowNull - lastDebugLogTime > 2000) {
+          lastDebugLogTime = nowNull;
+          addDebug(
+            `sampleRedChannel null döndürdü (${nullSampleCount} kez). video.paused=${video.paused}, videoWidth=${video.videoWidth}`
+          );
         }
       }
 
@@ -668,6 +738,25 @@ function MeasurementPageContent() {
                   Not: Cihazınızda flaş kontrolü desteklenmiyor (iOS Safari vb.). Lütfen parmağınızı güçlü bir ışık kaynağına (lamba, güneş) doğru tutarak lensi kapatın.
                 </p>
               )}
+
+              {/* TEMPORARY DEBUG PANEL — remove once camera pulse detection
+                  is confirmed working across target devices. Shows real-time
+                  internal state directly on screen since mobile testers
+                  usually can't reach the browser devtools console. */}
+              <div className="w-full mt-2 bg-slate-950 rounded-xl p-3 text-left max-h-40 overflow-y-auto">
+                <p className="text-[9px] font-bold text-amber-400 mb-1 uppercase tracking-wider">
+                  Hata Ayıklama Kaydı (Geçici)
+                </p>
+                {debugLines.length === 0 ? (
+                  <p className="text-[9px] text-slate-500">Henüz kayıt yok...</p>
+                ) : (
+                  debugLines.map((line, idx) => (
+                    <p key={idx} className="text-[9px] text-emerald-400 font-mono leading-tight break-all mb-0.5">
+                      {line}
+                    </p>
+                  ))
+                )}
+              </div>
             </motion.div>
           )}
 
