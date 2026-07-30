@@ -135,13 +135,17 @@ function MeasurementPageContent() {
     };
   }, []);
 
-  // Wire the camera stream to the hidden <video> element whenever it changes,
-  // and only START the pulse-sampling loop once the video is ACTUALLY playing
-  // real frames. Starting the RAF loop immediately after setStep("kamera_nabiz")
-  // races the DOM: the <video> element for that step doesn't exist yet (React
-  // hasn't committed the render), so sampleRedChannel would see a paused/empty
-  // video and return null forever — which looks exactly like "torch turns on
-  // but nothing ever reacts". Waiting for the 'playing' event closes that race.
+  // Wire the camera stream to the <video> element whenever it changes, and
+  // only START the pulse-sampling loop once the video is ACTUALLY playing
+  // real frames (confirmed via the 'playing' event, with a readyState-based
+  // fallback for browsers that don't fire it reliably). The <video> element
+  // itself is now ALWAYS mounted (see the top-level return below) rather
+  // than only inside the step==="kamera_nabiz" JSX branch — on-device
+  // debugging confirmed that conditional mounting caused videoRef.current to
+  // still be null at the exact moment this effect ran right after
+  // setStep("kamera_nabiz"), which made sampleRedChannel see no video at all
+  // and return null forever (looking exactly like "torch turns on but
+  // nothing ever reacts").
   const pulseStartRequestedRef = useRef(false);
 
   useEffect(() => {
@@ -579,6 +583,24 @@ function MeasurementPageContent() {
 
   return (
     <div className="flex-1 flex flex-col items-center justify-center px-4 py-6 md:py-10 max-w-md mx-auto w-full">
+      {/* Video element for camera pulse capture — ALWAYS mounted (never
+          conditionally rendered per step) and hidden purely via CSS.
+          ROOT CAUSE FIX: previously this was only rendered inside the
+          step==="kamera_nabiz" JSX branch. That meant videoRef.current was
+          still null at the exact moment the effect watching [cameraStream,
+          step] ran right after setStep("kamera_nabiz") — confirmed via the
+          on-screen debug log showing "videoRef=YOK" even once
+          step==='kamera_nabiz'. Keeping the element permanently in the DOM
+          removes that whole mount-timing race: the ref is populated on the
+          FIRST render of this component, long before any camera flow starts. */}
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted
+        className="hidden"
+      />
+
       {/* Back Button */}
       {step === "izin" && (
         <button
@@ -657,15 +679,6 @@ function MeasurementPageContent() {
               transition={{ duration: 0.4 }}
               className="space-y-6 w-full flex flex-col items-center"
             >
-              {/* Hidden Video Element for getUserMedia */}
-              <video
-                ref={videoRef}
-                autoPlay
-                playsInline
-                muted
-                className="hidden"
-              />
-
               {/* Circular Camera Preview Frame */}
               <div className="relative w-32 h-32 rounded-full border-4 border-sage-100 flex items-center justify-center overflow-hidden bg-sage-950 shadow-inner">
                 {/* Pulsing fingerprint icon inside */}
